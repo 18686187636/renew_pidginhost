@@ -3,7 +3,6 @@ const axios = require('axios');
 const API_TOKEN = process.env.PIDGINHOST_API_TOKEN;
 const BASE_URL = 'https://www.pidginhost.com/api';
 
-// 创建 axios 实例
 const client = axios.create({
   baseURL: BASE_URL,
   headers: {
@@ -12,64 +11,74 @@ const client = axios.create({
   },
 });
 
-// 代理配置（如果环境变量存在）
-if (process.env.HTTP_PROXY) {
-  // axios 通过环境变量自动使用代理
+// 代理通过环境变量自动生效
+
+// 计算两个日期相差天数
+function daysUntil(targetDate) {
+  const now = new Date();
+  const diff = new Date(targetDate) - now;
+  return Math.ceil(diff / (1000 * 60 * 60 * 24));
 }
 
 async function renew() {
   try {
-    console.log('🔄 开始获取服务列表...');
-    
-    // 1. 获取所有云服务器列表
-    // 参考: https://www.pidginhost.com/api/schema/swagger-ui/
-    const serversRes = await client.get('/cloud/servers/');
-    const servers = serversRes.data.data || serversRes.data;
-    
-    console.log(`📋 找到 ${servers.length} 台服务器`);
-    
+    console.log('📋 获取未支付发票列表...');
+    // 获取所有未支付发票（可能分页，这里简化处理，仅取第一页，可根据需要循环）
+    const invoicesRes = await client.get('/billing/invoices/', {
+      params: { status: 'unpaid' }  // 假设支持过滤，若不支持则手动过滤
+    });
+    const invoices = invoicesRes.data.results || invoicesRes.data || [];
+
+    console.log(`📄 找到 ${invoices.length} 张未支付发票`);
+
     let renewedCount = 0;
-    
-    for (const server of servers) {
-      // 检查服务器是否需要续期（根据你的业务逻辑判断）
-      // 例如：检查到期时间，如果小于7天则续期
-      const expiryDate = new Date(server.expiry_date);
-      const now = new Date();
-      const daysUntilExpiry = (expiryDate - now) / (1000 * 60 * 60 * 24);
-      
-      if (daysUntilExpiry <= 7) {
-        console.log(`🔄 正在续期服务器: ${server.name || server.id} (${daysUntilExpiry.toFixed(1)}天后到期)`);
-        
-        // 2. 执行续期操作
-        // 注意：具体续期接口需要根据实际 API 文档确认
-        // 可能的接口: POST /cloud/servers/{id}/renew/
-        // 或 PATCH /cloud/servers/{id}/
-        const renewRes = await client.post(`/cloud/servers/${server.id}/renew/`, {
-          // 续期参数，根据实际 API 调整
-          // 例如: period: 1, unit: 'month'
-        });
-        
-        if (renewRes.status === 200 || renewRes.status === 201) {
-          console.log(`✅ 服务器 ${server.name || server.id} 续期成功`);
+    let failedCount = 0;
+
+    for (const invoice of invoices) {
+      // 获取发票关联的服务详情
+      if (!invoice.service) {
+        console.log(`⚠️ 发票 #${invoice.id} 无关联服务，跳过`);
+        continue;
+      }
+
+      try {
+        const serviceRes = await client.get(`/billing/services/${invoice.service}/`);
+        const service = serviceRes.data;
+
+        // 检查服务到期时间（假设服务对象中有 expiry_date 字段）
+        const expiry = service.expiry_date || service.expires_at || service.next_due_date;
+        if (!expiry) {
+          console.log(`⚠️ 服务 ${service.id} 无到期时间，跳过`);
+          continue;
+        }
+
+        const days = daysUntil(expiry);
+        console.log(`🕒 服务 ${service.id} (${service.name || '未命名'}) 还有 ${days} 天到期`);
+
+        // 如果到期时间小于等于 7 天，尝试支付该发票
+        if (days <= 7) {
+          console.log(`💳 尝试支付发票 #${invoice.id} (金额: ${invoice.amount})`);
+          await client.post(`/billing/invoices/${invoice.id}/pay-with-funds/`, {});
+          console.log(`✅ 发票 #${invoice.id} 支付成功（使用余额）`);
           renewedCount++;
         } else {
-          console.log(`⚠️ 服务器 ${server.name || server.id} 续期返回: ${renewRes.status}`);
+          console.log(`⏳ 服务 ${service.id} 暂不需要续期`);
         }
-      } else {
-        console.log(`⏳ 服务器 ${server.name || server.id} 暂不需要续期 (${daysUntilExpiry.toFixed(1)}天后到期)`);
+      } catch (err) {
+        console.error(`❌ 处理服务 ${invoice.service} 出错:`, err.response?.data || err.message);
+        failedCount++;
       }
     }
-    
-    console.log(`🎉 续期完成，共续期 ${renewedCount} 台服务器`);
-    return { success: true, renewedCount };
-    
+
+    console.log(`🎉 续期完成：成功支付 ${renewedCount} 张发票，失败 ${failedCount} 张`);
+    if (failedCount > 0) {
+      // 通知部分失败，但整体返回成功，后续 TG 会告知
+    }
+    process.exit(0);
   } catch (error) {
-    console.error('❌ 续期失败:', error.response?.data || error.message);
-    throw error;
+    console.error('❌ 续期过程异常:', error.response?.data || error.message);
+    process.exit(1);
   }
 }
 
-// 执行续期
-renew()
-  .then(() => process.exit(0))
-  .catch(() => process.exit(1));
+renew();
