@@ -4,17 +4,15 @@ import sys
 import re
 import requests
 from datetime import datetime, timezone
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 # ---------- 配置 ----------
 API_TOKEN = os.getenv('PIDGINHOST_API_TOKEN')
-BASE_URL = 'https://www.pidginhost.com/api/'   # 必须带尾斜杠
+BASE_URL = 'https://www.pidginhost.com/api/'
 PANEL_BASE = 'https://www.pidginhost.com/'
 PROXY = os.getenv('PROXY_SERVER')
 TG_TOKEN = os.getenv('TG_BOT_TOKEN')
 TG_CHAT = os.getenv('TG_CHAT_ID')
-
-# 如需使用 email/password 登录（备选），可设置以下环境变量
 EMAIL = os.getenv('PIDGINHOST_EMAIL')
 PASSWORD = os.getenv('PIDGINHOST_PASSWORD')
 
@@ -22,16 +20,15 @@ if not API_TOKEN:
     print('❌ 缺少 PIDGINHOST_API_TOKEN')
     sys.exit(1)
 
-# 代理设置
 proxies = {'http': PROXY, 'https': PROXY} if PROXY else None
 
-# 用于 API 调用的 session（带 Token 认证）
+# API session
 api_session = requests.Session()
 api_session.headers.update({'Authorization': f'Token {API_TOKEN}', 'Content-Type': 'application/json'})
 if proxies:
     api_session.proxies.update(proxies)
 
-# 用于 Panel 操作的 session（后续使用）
+# Panel session
 panel_session = requests.Session()
 if proxies:
     panel_session.proxies.update(proxies)
@@ -65,47 +62,56 @@ def send_tg(text):
             print(f'⚠️ TG 通知失败: {e}')
 
 def get_csrf_token(session, url):
-    """访问页面，从 cookie 和 HTML 中提取 CSRF token"""
     resp = session.get(url)
     if resp.status_code != 200:
         return None, resp
-    # 从 cookie 获取 csrftoken
     csrf_cookie = session.cookies.get('csrftoken')
-    # 从 HTML 中提取表单 token（备用）
     match = re.search(r'name="csrfmiddlewaretoken"\s+value="([^"]+)"', resp.text)
     html_token = match.group(1) if match else None
     token = csrf_cookie or html_token
     return token, resp
 
+def login_panel(session):
+    """使用 EMAIL 和 PASSWORD 登录 Panel"""
+    if not EMAIL or not PASSWORD:
+        return False
+    login_url = urljoin(PANEL_BASE, 'panel/login/')
+    # 获取 CSRF token
+    csrf_token, resp = get_csrf_token(session, login_url)
+    if not csrf_token:
+        print('⚠️ 无法获取登录 CSRF token')
+        return False
+    data = {
+        'csrfmiddlewaretoken': csrf_token,
+        'username': EMAIL,
+        'password': PASSWORD,
+        'next': '/panel/'
+    }
+    login_resp = session.post(login_url, data=data, headers={'Referer': login_url})
+    # 登录成功通常重定向到 /panel/
+    if login_resp.status_code == 302:
+        print('✅ Panel 登录成功')
+        return True
+    else:
+        print(f'❌ Panel 登录失败 (状态码 {login_resp.status_code})')
+        return False
+
 def renew_via_panel(server_id):
-    """通过 Panel 表单续期，返回 (success, message)"""
     url = urljoin(PANEL_BASE, f'panel/cloud/servers/{server_id}/')
-    # 先获取 CSRF token
     csrf_token, resp = get_csrf_token(panel_session, url)
     if not csrf_token:
         if resp.status_code == 302:
-            return False, "Panel 需要登录，请设置 PIDGINHOST_EMAIL 和 PASSWORD 或使用 API 方式"
+            return False, "Panel 需要登录"
         return False, f"无法获取 CSRF token (状态码 {resp.status_code})"
-    
-    # 构造 POST 数据
-    data = {
-        'csrfmiddlewaretoken': csrf_token,
-        'action': 'extend_renewal'
-    }
-    headers = {
-        'Referer': url,
-        'X-CSRFToken': csrf_token,
-    }
-    # 发送 POST
+    data = {'csrfmiddlewaretoken': csrf_token, 'action': 'extend_renewal'}
+    headers = {'Referer': url, 'X-CSRFToken': csrf_token}
     post_resp = panel_session.post(url, data=data, headers=headers, allow_redirects=False)
     if post_resp.status_code == 302:
-        # 重定向到同一页面表示成功
         return True, "续期成功 (Panel POST)"
     else:
         return False, f"续期失败 (状态码 {post_resp.status_code})"
 
 def renew_via_api(server_id):
-    """尝试通过 API 续期（如果存在），返回 (success, message)"""
     endpoints = [
         f'cloud/servers/{server_id}/renew/',
         f'cloud/servers/{server_id}/extend/',
@@ -131,20 +137,34 @@ def main():
         servers = fetch_all_pages(urljoin(BASE_URL, 'cloud/servers/'))
         print(f'📋 找到 {len(servers)} 台服务器')
 
-        # 尝试用 API Token 访问 Panel，如果能成功，则后续使用 panel 方式
-        # 先测试 panel 访问
-        test_url = urljoin(PANEL_BASE, 'panel/cloud/servers/')
-        test_resp = panel_session.get(test_url)
-        panel_accessible = (test_resp.status_code == 200)
+        # 尝试登录 Panel（如果提供了凭据）
+        panel_logged_in = False
+        if EMAIL and PASSWORD:
+            panel_logged_in = login_panel(panel_session)
+        else:
+            # 检查是否已经通过 cookie 认证
+            test_resp = panel_session.get(urljoin(PANEL_BASE, 'panel/'))
+            if test_resp.status_code == 200:
+                panel_logged_in = True
+            else:
+                print('⚠️ Panel 未登录，未提供 EMAIL/PASSWORD，将仅尝试 API 续期')
 
         renewed = 0
         failed = 0
         details = []
 
         for server in servers:
-            sid = server['id']
+            sid = server.get('id')
             name = server.get('name', '未命名')
-            expiry = server.get('expiry_date') or server.get('next_due_date')
+            # 打印所有键以便调试
+            print(f'🔍 服务器 {sid} 的键: {list(server.keys())}')
+            
+            # 尝试多个日期字段
+            expiry = None
+            for field in ['expiry_date', 'expires_at', 'expiration_date', 'end_date', 'next_due_date']:
+                if server.get(field):
+                    expiry = server[field]
+                    break
             if not expiry:
                 print(f'⚠️ 服务器 {sid} 无到期时间，跳过')
                 continue
@@ -159,9 +179,6 @@ def main():
                 continue
 
             # 尝试续期
-            success = False
-            msg = ''
-            # 首先尝试 API 方式
             success, msg = renew_via_api(sid)
             if success:
                 print(f'✅ {msg}')
@@ -169,8 +186,8 @@ def main():
                 details.append(f'✅ 服务器 {sid} 续期成功 (API)')
                 continue
 
-            # API 失败，尝试 Panel 方式（如果可访问）
-            if panel_accessible:
+            # API 失败，尝试 Panel（如果已登录）
+            if panel_logged_in:
                 success, msg = renew_via_panel(sid)
                 if success:
                     print(f'✅ {msg}')
@@ -180,10 +197,9 @@ def main():
                 else:
                     print(f'⚠️ Panel 续期失败: {msg}')
             else:
-                msg = "Panel 不可访问，请提供登录凭据或检查网络"
-                print(f'⚠️ {msg}')
+                print(f'⚠️ Panel 未登录，无法使用 Panel 续期')
 
-            # 全部失败
+            # 所有方式均失败
             print(f'❌ 服务器 {sid} 续期失败: {msg}')
             failed += 1
             details.append(f'❌ 服务器 {sid} 续期失败: {msg}')
