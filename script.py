@@ -12,7 +12,7 @@ PANEL_BASE = 'https://www.pidginhost.com/'
 PROXY = os.getenv('PROXY_SERVER')
 TG_TOKEN = os.getenv('TG_BOT_TOKEN')
 TG_CHAT = os.getenv('TG_CHAT_ID')
-PANEL_COOKIE_RAW = os.getenv('PANEL_COOKIE')  # JSON 数组或 Cookie 字符串
+PANEL_COOKIE_RAW = os.getenv('PANEL_COOKIE')  # 字符串
 
 if not API_TOKEN:
     print('❌ 缺少 PIDGINHOST_API_TOKEN')
@@ -35,20 +35,22 @@ panel_session = requests.Session()
 if proxies:
     panel_session.proxies.update(proxies)
 
-# 解析 Cookie
+# 清空可能存在的旧 cookies，避免重复
+panel_session.cookies.clear()
+
 cookie_dict = {}
 raw = PANEL_COOKIE_RAW.strip()
 
-# 尝试作为 JSON 解析
+# 尝试作为 JSON 解析（如果是数组）
 if raw.startswith('[') or raw.startswith('{'):
     try:
-        cookie_list = json.loads(raw)
-        if isinstance(cookie_list, list):
-            for item in cookie_list:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            for item in data:
                 if 'name' in item and 'value' in item:
                     cookie_dict[item['name']] = item['value']
-        elif isinstance(cookie_list, dict):
-            cookie_dict = cookie_list  # 直接键值对
+        elif isinstance(data, dict):
+            cookie_dict = data
     except json.JSONDecodeError:
         pass
 
@@ -60,7 +62,7 @@ if not cookie_dict:
             k, v = pair.split('=', 1)
             cookie_dict[k] = v
 
-# 应用到 session
+# 应用 Cookie（此时 session 已清空）
 panel_session.cookies.update(cookie_dict)
 
 # ---------- 工具函数 ----------
@@ -76,11 +78,17 @@ def get_csrf_token(session, url):
     resp = session.get(url)
     if resp.status_code != 200:
         return None, resp
-    csrf_cookie = session.cookies.get('csrftoken')
-    match = re.search(r'name="csrfmiddlewaretoken"\s+value="([^"]+)"', resp.text)
-    html_token = match.group(1) if match else None
-    token = csrf_cookie or html_token
-    return token, resp
+    # 从 cookies 中获取 csrftoken（避免重复异常）
+    csrf_cookie = None
+    for c in session.cookies:
+        if c.name == 'csrftoken':
+            csrf_cookie = c.value
+            break
+    # 如果 cookie 中没有，从 HTML 中提取
+    if not csrf_cookie:
+        match = re.search(r'name="csrfmiddlewaretoken"\s+value="([^"]+)"', resp.text)
+        csrf_cookie = match.group(1) if match else None
+    return csrf_cookie, resp
 
 def renew_server_via_panel(server_id):
     url = urljoin(PANEL_BASE, f'panel/cloud/servers/{server_id}/')
