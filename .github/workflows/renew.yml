@@ -157,7 +157,7 @@ jobs:
           PIDGINHOST_API_TOKEN: ${{ secrets.PIDGINHOST_API_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          # PROXY_SERVER 已由上一步通过环境变量设置
+          PANEL_COOKIE: ${{ secrets.PANEL_COOKIE }}   # ✅ 关键修复：传递 Cookie
         run: python3 script.py
 
-      # 注意：已移除"最终通知"步骤，只保留脚本内部的续期结果通知
+      # 已移除"最终通知"步骤，只保留脚本内部的续期结果通知
