@@ -1,6 +1,6 @@
 # PidginHost 免费服务器自动续期
 
-[![PidginHost Auto Renew](https://github.com/your-username/renew_pidginhost/actions/workflows/renew.yml/badge.svg)](https://github.com/your-username/renew_pidginhost/actions/workflows/renew.yml)
+[![PidginHost Auto Renew](https://github.com/18686187636/renew_pidginhost/actions/workflows/renew.yml/badge.svg)](https://github.com/18686187636/renew_pidginhost/actions/workflows/renew.yml)
 
 通过 GitHub Actions 自动续期 PidginHost 免费服务器（每 30 天约 3 次），并发送 Telegram 通知。支持通过代理访问（Sing‑box），适用于网络受限环境。
 
