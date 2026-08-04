@@ -156,6 +156,7 @@ jobs:
           PIDGINHOST_API_TOKEN: ${{ secrets.PIDGINHOST_API_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          PANEL_COOKIE: ${{ secrets.PANEL_COOKIE }}   # 添加这一行
           # PROXY_SERVER 已由上一步通过环境变量设置
         run: python3 script.py
 
