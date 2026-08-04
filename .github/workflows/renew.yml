@@ -2,15 +2,13 @@ name: PidginHost Auto Renew
 
 on:
   schedule:
-    # 每天 UTC 00:00 运行，可根据需要调整
-    - cron: '0 0 * * *'
-  workflow_dispatch:
-    # 支持手动触发
+    - cron: '0 0 * * *'          # 每天 UTC 0 点运行
+  workflow_dispatch:              # 支持手动触发
 
 jobs:
   renew:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,24 +23,13 @@ jobs:
 
       - name: Setup Sing-box proxy
         run: |
-          # 下载 sing-box
           wget https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.tar.gz
           tar -xzf sing-box-linux-amd64.tar.gz
           mv sing-box-*/sing-box /usr/local/bin/
-          
-          # 创建配置目录
           mkdir -p ~/.config/sing-box
-          
-          # 下载订阅配置
           curl -L "$NODE_LINK" -o ~/.config/sing-box/config.json
-          
-          # 后台启动 sing-box
           nohup sing-box run -c ~/.config/sing-box/config.json > /dev/null 2>&1 &
-          
-          # 等待代理启动
           sleep 5
-          
-          # 设置代理环境变量
           echo "HTTP_PROXY=http://127.0.0.1:7890" >> $GITHUB_ENV
           echo "HTTPS_PROXY=http://127.0.0.1:7890" >> $GITHUB_ENV
         env:
@@ -57,9 +44,9 @@ jobs:
         if: always()
         run: |
           if [ "${{ job.status }}" = "success" ]; then
-            MESSAGE="✅ PidginHost 自动续期成功！"
+            MESSAGE="✅ PidginHost 自动续期任务执行成功"
           else
-            MESSAGE="❌ PidginHost 自动续期失败，请检查日志。"
+            MESSAGE="❌ PidginHost 自动续期任务执行失败，请检查日志"
           fi
           curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
             -d "chat_id=$TG_CHAT_ID" \
