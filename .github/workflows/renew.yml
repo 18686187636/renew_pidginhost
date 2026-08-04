@@ -1,0 +1,69 @@
+name: PidginHost Auto Renew
+
+on:
+  schedule:
+    # 每天 UTC 00:00 运行，可根据需要调整
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # 支持手动触发
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install axios
+
+      - name: Setup Sing-box proxy
+        run: |
+          # 下载 sing-box
+          wget https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.tar.gz
+          tar -xzf sing-box-linux-amd64.tar.gz
+          mv sing-box-*/sing-box /usr/local/bin/
+          
+          # 创建配置目录
+          mkdir -p ~/.config/sing-box
+          
+          # 下载订阅配置
+          curl -L "$NODE_LINK" -o ~/.config/sing-box/config.json
+          
+          # 后台启动 sing-box
+          nohup sing-box run -c ~/.config/sing-box/config.json > /dev/null 2>&1 &
+          
+          # 等待代理启动
+          sleep 5
+          
+          # 设置代理环境变量
+          echo "HTTP_PROXY=http://127.0.0.1:7890" >> $GITHUB_ENV
+          echo "HTTPS_PROXY=http://127.0.0.1:7890" >> $GITHUB_ENV
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+
+      - name: Run renew script
+        run: node renew.js
+        env:
+          PIDGINHOST_API_TOKEN: ${{ secrets.PIDGINHOST_API_TOKEN }}
+
+      - name: Send Telegram notification
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            MESSAGE="✅ PidginHost 自动续期成功！"
+          else
+            MESSAGE="❌ PidginHost 自动续期失败，请检查日志。"
+          fi
+          curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+            -d "chat_id=$TG_CHAT_ID" \
+            -d "text=$MESSAGE"
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
