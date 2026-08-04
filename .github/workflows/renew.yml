@@ -2,8 +2,9 @@ name: PidginHost Auto Renew
 
 on:
   schedule:
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    # 每 10 天运行一次 (UTC 00:00)，即每 30 天约 3 次
+    - cron: '0 0 */10 * *'
+  workflow_dispatch:   # 保留手动触发
 
 jobs:
   renew:
@@ -156,21 +157,7 @@ jobs:
           PIDGINHOST_API_TOKEN: ${{ secrets.PIDGINHOST_API_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          PANEL_COOKIE: ${{ secrets.PANEL_COOKIE }}   # 添加这一行
           # PROXY_SERVER 已由上一步通过环境变量设置
         run: python3 script.py
 
-      - name: 📢 Telegram 最终通知
-        if: always()
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: |
-          if [ "${{ job.status }}" = "success" ]; then
-            MESSAGE="✅ PidginHost 自动续期任务完成"
-          else
-            MESSAGE="❌ PidginHost 自动续期任务失败，请检查日志"
-          fi
-          curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
-            -d "chat_id=$TG_CHAT_ID" \
-            -d "text=$MESSAGE"
+      # 注意：已移除"最终通知"步骤，只保留脚本内部的续期结果通知
