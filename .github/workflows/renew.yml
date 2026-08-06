@@ -1,48 +1,163 @@
-name: HAX Auto Renew
+name: PidginHost Auto Renew
 
 on:
   schedule:
-    - cron: '0 0 * * *'          # 每天 UTC 00:00（北京时间 08:00）
-  workflow_dispatch:             # 允许手动触发
+    # 每 10 天运行一次 (UTC 00:00)，即每 30 天约 3 次
+    - cron: '0 0 */10 * *'
+  workflow_dispatch:   # 保留手动触发
 
 jobs:
   renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
-      - name: Checkout
+      - name: 📥 检出代码
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: 🐍 设置 Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
 
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg xvfb chromium-browser
+      - name: 📦 安装 Python 依赖（含 SOCKS 支持）
+        run: pip install requests[socks]
 
-      - name: Start sing-box proxy (if NODE_LINK provided)
+      - name: 🔗 配置代理（sing-box）
         if: env.NODE_LINK != ''
-        run: |
-          wget -q https://github.com/SagerNet/sing-box/releases/download/v1.13.16/sing-box-1.13.16-linux-amd64-glibc.tar.gz
-          tar -xzf sing-box-*.tar.gz
-          cd sing-box-*-linux-amd64-glibc
-          python3 ../gen_config.py
-          ./sing-box run -c config.json &
-          sleep 5
-          echo "✅ 代理已启动 (127.0.0.1:1080)"
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
-
-      - name: Run renewal script
         run: |
-          xvfb-run --auto-servernum python renew.py
+          set -e
+
+          echo "⬇️ 获取 sing-box 最新稳定版..."
+          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | \
+            grep -o '"browser_download_url": "[^"]*linux-amd64[^"]*"' | \
+            grep -v 'alpha\|beta\|rc' | head -1 | sed 's/"browser_download_url": "//' | sed 's/"//')
+          if [ -z "$LATEST_URL" ]; then
+            echo "❌ 无法获取下载链接，使用已知稳定版本 v1.13.15"
+            LATEST_URL="https://github.com/SagerNet/sing-box/releases/download/v1.13.15/sing-box-linux-amd64.tar.gz"
+          fi
+          echo "📥 下载地址: $LATEST_URL"
+
+          for i in {1..3}; do
+            echo "尝试 $i/3..."
+            curl -L -o sing-box.tar.gz "$LATEST_URL" --connect-timeout 30 --max-time 60
+            if [ -f sing-box.tar.gz ] && file sing-box.tar.gz | grep -q 'gzip compressed data'; then
+              echo "✅ 下载成功"
+              break
+            fi
+            echo "⚠️ 重试..." && rm -f sing-box.tar.gz && sleep 3
+          done
+          [ -f sing-box.tar.gz ] || { echo "❌ 下载失败，跳过代理"; exit 0; }
+
+          tar -xzf sing-box.tar.gz
+          SING_BOX_DIR=$(find . -maxdepth 1 -type d -name "sing-box-*" | head -1)
+          [ -z "$SING_BOX_DIR" ] && { echo "❌ 解压失败"; exit 1; }
+          sudo mv "$SING_BOX_DIR/sing-box" /usr/local/bin/
+          sudo chmod +x /usr/local/bin/sing-box
+          rm -rf sing-box.tar.gz "$SING_BOX_DIR"
+          sing-box version
+
+          echo "📝 解析 vless 链接生成 sing-box 配置..."
+          python3 << 'PYEOF'
+          import json, sys, os, re
+          from urllib.parse import urlparse, parse_qs
+
+          link = os.environ.get('NODE_LINK', '').strip()
+          if not link:
+              sys.exit(0)
+          if not link.startswith('vless://'):
+              print("⚠️ 链接不是 vless://，跳过代理")
+              sys.exit(0)
+
+          parsed = urlparse(link)
+          netloc = parsed.netloc
+          if '@' in netloc:
+              uuid, host_port = netloc.split('@', 1)
+          else:
+              uuid, host_port = '', netloc
+
+          host, port = '', '443'
+          bracket_match = re.match(r'^\[([^\]]+)\](?::(\d+))?$', host_port)
+          if bracket_match:
+              host = bracket_match.group(1)
+              if bracket_match.group(2):
+                  port = bracket_match.group(2)
+          else:
+              if host_port.count(':') > 1:
+                  host = host_port
+              else:
+                  if ':' in host_port:
+                      host, port = host_port.split(':', 1)
+                  else:
+                      host = host_port
+
+          if not host:
+              print(f"❌ 无法解析主机地址: {host_port}")
+              sys.exit(1)
+
+          params = parse_qs(parsed.query)
+          sni = params.get('sni', [''])[0] or host
+          fp = params.get('fp', [''])[0] or 'chrome'
+          flow = params.get('flow', [''])[0] or 'xtls-rprx-vision'
+          type_ = params.get('type', ['tcp'])[0]
+          security = params.get('security', [''])[0]
+
+          outbound = {
+              "type": "vless",
+              "tag": "vless-out",
+              "server": host,
+              "server_port": int(port),
+              "uuid": uuid,
+              "flow": flow,
+              "tls": {
+                  "enabled": True,
+                  "server_name": sni,
+                  "insecure": False,
+                  "utls": {"enabled": True, "fingerprint": fp}
+              },
+              "packet_encoding": "packetaddr"
+          }
+          if type_ != 'tcp':
+              outbound["transport"] = {"type": type_}
+          if security == 'reality':
+              pbk = params.get('pbk', [''])[0]
+              sid = params.get('sid', [''])[0]
+              outbound['tls']['reality'] = {"enabled": True, "public_key": pbk, "short_id": sid}
+
+          config = {
+              "log": {"level": "warn"},
+              "inbounds": [{"type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 1080}],
+              "outbounds": [outbound],
+              "route": {"rules": [{"outbound": "vless-out", "protocol": ["tcp", "udp"]}]}
+          }
+          with open("sing-box-config.json", "w") as f:
+              json.dump(config, f, indent=2)
+          print("✅ 配置已生成")
+          PYEOF
+
+          if [ -f sing-box-config.json ]; then
+            echo "🚀 启动 sing-box..."
+            nohup sing-box -c sing-box-config.json run > sing-box.log 2>&1 &
+            sleep 5
+            if ss -tuln | grep -q ':1080'; then
+              echo "✅ 代理已启动（127.0.0.1:1080）"
+              echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
+            else
+              echo "❌ 代理启动失败，查看日志："
+              cat sing-box.log
+              exit 1
+            fi
+          else
+            echo "⚠️ 未生成配置文件，跳过代理"
+          fi
+
+      - name: 🚀 运行续期脚本（使用仓库中的 script.py）
         env:
-          ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
-          HEADLESS: "true"
-          # 如果有备用语音识别 API，可设置
-          # AUDIO_API_URL: ${{ secrets.AUDIO_API_URL }}
+          PIDGINHOST_API_TOKEN: ${{ secrets.PIDGINHOST_API_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          PANEL_COOKIE: ${{ secrets.PANEL_COOKIE }}   # ✅ 关键修复：传递 Cookie
+        run: python3 script.py
+
+      # 已移除"最终通知"步骤，只保留脚本内部的续期结果通知
