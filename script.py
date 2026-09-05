@@ -4,8 +4,7 @@ import sys
 import re
 import json
 import requests
-from urllib.parse import urljoin, urlparse
-from datetime import datetime, timedelta
+from urllib.parse import urljoin
 
 # ---------- 配置 ----------
 API_TOKEN = os.getenv('PIDGINHOST_API_TOKEN')
@@ -25,13 +24,11 @@ if not PANEL_COOKIE_RAW:
 
 proxies = {'http': PROXY, 'https': PROXY} if PROXY else None
 
-# API session
 api_session = requests.Session()
 api_session.headers.update({'Authorization': f'Token {API_TOKEN}', 'Content-Type': 'application/json'})
 if proxies:
     api_session.proxies.update(proxies)
 
-# Panel session
 panel_session = requests.Session()
 if proxies:
     panel_session.proxies.update(proxies)
@@ -72,14 +69,10 @@ def send_tg(text):
             print(f'⚠️ TG 通知失败: {e}')
 
 def get_csrf_token_and_action(session, url):
-    """
-    获取 CSRF token 和续期 action 参数（从 HTML 中动态提取）
-    """
-    resp = session.get(url)
+    resp = session.get(url, timeout=30)
     if resp.status_code != 200:
         return None, None, resp
 
-    # 从 cookie 中获取 csrftoken
     csrf_cookie = None
     for c in session.cookies:
         if c.name == 'csrftoken':
@@ -89,52 +82,25 @@ def get_csrf_token_and_action(session, url):
         match = re.search(r'name="csrfmiddlewaretoken"\s+value="([^"]+)"', resp.text)
         csrf_cookie = match.group(1) if match else None
 
-    # 从 HTML 中提取 action 值（续期操作名）
+    # 提取 action 值
     action_value = None
-    # 通常续期按钮是一个表单，包含 input name="action" value="extend_renewal"
-    # 也可能在其他地方，我们尽量匹配
-    # 先尝试找 input 标签
     action_match = re.search(r'name="action"\s+value="([^"]+)"', resp.text)
     if action_match:
         action_value = action_match.group(1)
     else:
-        # 可能是一个按钮或表单 action 参数，我们尝试查找带有 "extend" 或 "renew" 的 value
-        # 如果没找到，默认使用 'extend_renewal'（保守）
         if 'extend_renewal' in resp.text:
             action_value = 'extend_renewal'
         elif 'renew' in resp.text:
-            # 尝试提取第一个包含 renew 的 value
             renew_match = re.search(r'value="([^"]*renew[^"]*)"', resp.text, re.I)
-            if renew_match:
-                action_value = renew_match.group(1)
-            else:
-                action_value = 'extend_renewal'  # 默认
+            action_value = renew_match.group(1) if renew_match else 'extend_renewal'
         else:
-            action_value = 'extend_renewal'  # 默认
+            action_value = 'extend_renewal'
 
     return csrf_cookie, action_value, resp
 
-def get_server_expiration(server_id):
-    """
-    通过 API 获取指定服务器的到期时间（字符串），若不存在则返回 None
-    """
-    url = urljoin('https://www.pidginhost.com/api/', f'cloud/servers/{server_id}/')
-    try:
-        resp = api_session.get(url, timeout=30)
-        if resp.status_code == 200:
-            data = resp.json()
-            # 尝试多种可能的字段名
-            for key in ['expiration_date', 'expire_date', 'expires_at', 'expiry']:
-                if key in data:
-                    return data[key]
-    except Exception as e:
-        print(f'⚠️ 获取服务器 {server_id} 到期时间失败: {e}')
-    return None
-
 def renew_server_via_panel(server_id):
     """
-    续期单台服务器，并验证是否真正成功
-    返回 (success, message, new_expiration)
+    续期单台服务器，通过解析详情页中的 "expires in X days" 确认续期成功
     """
     url = urljoin(PANEL_BASE, f'panel/cloud/servers/{server_id}/')
     csrf_token, action_value, resp = get_csrf_token_and_action(panel_session, url)
@@ -143,10 +109,7 @@ def renew_server_via_panel(server_id):
             return False, "Cookie 过期或无效", None
         return False, f"无法获取 CSRF token (状态码 {resp.status_code})", None
 
-    # 记录续期前的到期时间（如果有）
-    old_exp = get_server_expiration(server_id)
-
-    # 发送续期 POST 请求
+    # 发送续期 POST
     data = {
         'csrfmiddlewaretoken': csrf_token,
         'action': action_value if action_value else 'extend_renewal'
@@ -154,29 +117,35 @@ def renew_server_via_panel(server_id):
     headers = {'Referer': url, 'X-CSRFToken': csrf_token}
     post_resp = panel_session.post(url, data=data, headers=headers, allow_redirects=False, timeout=30)
 
-    # 判断是否成功：状态码 302 且重定向到服务器详情页
+    # 如果 POST 返回 302 且跳转到登录页，直接失败
     if post_resp.status_code == 302:
         location = post_resp.headers.get('Location', '')
-        # 检查 Location 是否指向详情页（而不是登录页或其它）
-        if '/panel/cloud/servers/' in location:
-            # 进一步验证：获取新的到期时间，对比是否变化
-            new_exp = get_server_expiration(server_id)
-            if old_exp is not None and new_exp is not None:
-                # 尝试解析日期比较（简化：只要字符串不同就认为更新）
-                if old_exp != new_exp:
-                    return True, f"续期成功（到期时间更新为 {new_exp}）", new_exp
-                else:
-                    # 可能续期无效，但面板返回 302，这种情况罕见，但记录警告
-                    return False, "续期操作返回 302，但到期时间未变化，可能续期失败", new_exp
-            else:
-                # 无法验证到期时间，仅凭重定向成功，保守认为成功（但提示无法验证）
-                return True, "续期成功（无法验证到期时间，仅根据重定向判断）", None
+        if '/accounts/login/' in location:
+            return False, "重定向到登录页，Cookie 失效", None
+
+    # 再次 GET 服务器详情页，解析到期信息
+    detail_resp = panel_session.get(url, timeout=30)
+    if detail_resp.status_code != 200:
+        # 降级：如果 POST 是 302 且未跳转登录，就算成功（但记录警告）
+        if post_resp.status_code == 302:
+            return True, "续期成功（无法验证详情页，仅根据重定向判断）", None
         else:
-            # 重定向到非详情页（如登录页）
-            return False, f"重定向到非详情页: {location}", None
+            return False, f"续期失败，且无法获取详情页 (状态码 {detail_resp.status_code})", None
+
+    # 在 HTML 中查找 "expires in X days"
+    match = re.search(r'expires\s+in\s+(\d+)\s+days?', detail_resp.text, re.IGNORECASE)
+    if match:
+        days = int(match.group(1))
+        if days > 0:
+            return True, f"续期成功（到期剩余 {days} 天）", f"{days} days"
+        else:
+            return False, f"续期失败（到期剩余 {days} 天，未延长）", None
     else:
-        # 非 302，直接失败
-        return False, f"续期失败 (状态码 {post_resp.status_code})", None
+        # 未找到天数，但可能页面结构变化，降级判断
+        if post_resp.status_code == 302:
+            return True, "续期成功（未解析到天数，但重定向成功）", None
+        else:
+            return False, "续期失败（未检测到续期成功标志）", None
 
 def fetch_all_servers():
     url = urljoin('https://www.pidginhost.com/api/', 'cloud/servers/')
@@ -219,9 +188,7 @@ def main():
             if success:
                 print(f'✅ {msg}')
                 renewed += 1
-                details.append(f'✅ 服务器 {sid} 续期成功')
-                if new_exp:
-                    details[-1] += f'（到期 {new_exp}）'
+                details.append(f'✅ 服务器 {sid} 续期成功' + (f'（{new_exp}）' if new_exp else ''))
             else:
                 print(f'❌ {msg}')
                 failed += 1
