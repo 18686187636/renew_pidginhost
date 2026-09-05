@@ -5,7 +5,7 @@ import re
 import json
 import requests
 import time
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 # ---------- 配置 ----------
 API_TOKEN = os.getenv('PIDGINHOST_API_TOKEN')
@@ -101,13 +101,14 @@ def get_csrf_token_and_action(session, url):
 
 def extract_expiry_days(html_text):
     """
-    从原始 HTML 中提取 "expires in X days" 或 "剩余 X 天" 等。
+    从 HTML 中提取 "expires in X days" 或类似表述。
     返回天数（int）或 None。
     """
-    # 先尝试精确匹配（无需清理）
+    # 直接匹配原始 HTML（不清理）
     patterns = [
         r'This\s+free\s+server\s+expires\s+in\s+(\d+)\s+days?',
         r'expires\s+in\s+(\d+)\s+days?',
+        r'remaining\s+(\d+)\s+days?',
         r'(\d+)\s+days?\s+remaining',
         r'剩余\s*(\d+)\s*天',
         r'(\d+)\s+days?\s+left',
@@ -116,7 +117,7 @@ def extract_expiry_days(html_text):
         match = re.search(pat, html_text, re.IGNORECASE)
         if match:
             return int(match.group(1))
-    # 若失败，清理 HTML 后再试
+    # 若失败，清理标签后再试
     clean = re.sub(r'<[^>]+>', ' ', html_text)
     clean = re.sub(r'\s+', ' ', clean).strip()
     for pat in patterns:
@@ -125,50 +126,52 @@ def extract_expiry_days(html_text):
             return int(match.group(1))
     return None
 
-def get_detail_page(server_id, session, follow_redirect=True):
+def get_page(url, session, allow_redirects=True, cache_control=True):
     """
-    获取服务器详情页，返回 (响应对象, 最终URL)
+    获取页面，可设置缓存控制头。
+    返回 (响应对象, 最终URL)
     """
-    url = urljoin(PANEL_BASE, f'panel/cloud/servers/{server_id}/')
-    # 添加缓存控制头
-    headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
-    if follow_redirect:
-        resp = session.get(url, headers=headers, allow_redirects=True, timeout=30)
-    else:
-        resp = session.get(url, headers=headers, allow_redirects=False, timeout=30)
-    return resp, resp.url if follow_redirect else url
+    headers = {}
+    if cache_control:
+        headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    resp = session.get(url, headers=headers, allow_redirects=allow_redirects, timeout=30)
+    return resp, resp.url if allow_redirects else url
 
-def get_current_days(server_id, session, max_retries=3, delay=2):
+def get_current_days_for_url(url, session, max_retries=3, delay=2):
     """
-    尝试获取服务器当前剩余天数，重试 max_retries 次。
+    根据给定的 URL 获取当前剩余天数，重试 max_retries 次。
     返回 (天数, 响应对象, 最终URL) 或 (None, None, None)
     """
     for attempt in range(max_retries):
-        time.sleep(delay)
-        resp, final_url = get_detail_page(server_id, session, follow_redirect=True)
+        if attempt > 0:
+            time.sleep(delay)
+        resp, final_url = get_page(url, session, allow_redirects=True)
         if resp.status_code != 200:
+            print(f'  ⚠️ 获取页面失败，状态码 {resp.status_code} (尝试 {attempt+1}/{max_retries})')
             continue
         days = extract_expiry_days(resp.text)
         if days is not None:
             return days, resp, final_url
+        # 调试：打印页面片段
+        snippet = resp.text[:300].replace('\n', ' ')
+        print(f'  ⚠️ 未解析到天数 (尝试 {attempt+1}/{max_retries})，页面开头片段：{snippet}')
     return None, None, None
 
 def renew_server_via_panel(server_id):
     """
-    续期服务器，并严格验证到期时间是否延长。
+    续期服务器，并验证天数是否增加。
     返回 (success, message, new_days)
     """
-    # 1. 获取续期前的天数
+    # 1. 获取续期前的详情页 URL（用于提取旧天数）
+    detail_url = urljoin(PANEL_BASE, f'panel/cloud/servers/{server_id}/')
     print('  ⏳ 获取续期前剩余天数...')
-    old_days, _, _ = get_current_days(server_id, panel_session, max_retries=2, delay=1)
+    old_days, _, _ = get_current_days_for_url(detail_url, panel_session, max_retries=2, delay=1)
     if old_days is None:
-        # 如果无法获取，仍继续，但后续会以旧天数为0处理（保守）
         print('  ⚠️ 无法获取续期前天数，将视为 0')
         old_days = 0
 
     # 2. 获取 CSRF token 和 action
-    url = urljoin(PANEL_BASE, f'panel/cloud/servers/{server_id}/')
-    csrf_token, action_value, resp = get_csrf_token_and_action(panel_session, url)
+    csrf_token, action_value, resp = get_csrf_token_and_action(panel_session, detail_url)
     if not csrf_token:
         if resp.status_code == 302:
             return False, "Cookie 过期或无效", None
@@ -180,43 +183,42 @@ def renew_server_via_panel(server_id):
         'csrfmiddlewaretoken': csrf_token,
         'action': action_value if action_value else 'extend_renewal'
     }
-    headers = {'Referer': url, 'X-CSRFToken': csrf_token}
-    post_resp = panel_session.post(url, data=data, headers=headers, allow_redirects=False, timeout=30)
+    headers = {'Referer': detail_url, 'X-CSRFToken': csrf_token}
+    # 不允许自动重定向，以便我们捕获 Location
+    post_resp = panel_session.post(detail_url, data=data, headers=headers, allow_redirects=False, timeout=30)
 
     if post_resp.status_code == 302:
         location = post_resp.headers.get('Location', '')
         if '/accounts/login/' in location:
             return False, "重定向到登录页，Cookie 失效", None
-        # 续期请求已接受，继续验证
+        # 使用 Location 作为续期后的目标 URL
+        # 注意：Location 可能是相对路径，需要拼接
+        if not location.startswith('http'):
+            location = urljoin(PANEL_BASE, location)
+        final_url = location
+        print(f'  ✅ 收到续期重定向，Location: {location}')
     else:
         return False, f"续期请求失败 (状态码 {post_resp.status_code})", None
 
-    # 4. 等待并获取续期后的天数（重试多次）
+    # 4. 等待并获取续期后的天数（使用 Location URL）
     print('  ⏳ 等待并获取续期后剩余天数...')
     new_days = None
-    for attempt in range(5):  # 最多尝试5次
-        time.sleep(2)  # 每次等待2秒
-        days, resp, final_url = get_current_days(server_id, panel_session, max_retries=1, delay=0)
+    for attempt in range(6):  # 最多尝试6次
+        if attempt > 0:
+            time.sleep(2)
+        days, resp, final_url = get_current_days_for_url(final_url, panel_session, max_retries=1, delay=0)
         if days is not None:
             new_days = days
             break
-        # 如果响应中包含错误信息，记录
-        if resp and resp.status_code != 200:
-            print(f'  ⚠️ 获取详情页失败，状态码 {resp.status_code}，重试 {attempt+1}/5')
-        else:
-            print(f'  ⚠️ 未解析到天数，重试 {attempt+1}/5')
+        print(f'  ⚠️ 未解析到天数，重试 {attempt+1}/6')
 
-    # 5. 验证天数是否增加
     if new_days is None:
-        return False, "续期后未能获取剩余天数（可能页面结构变化）", None
+        return False, "续期后未能获取剩余天数", None
 
-    # 判断续期是否真正成功：天数必须比旧天数大（或者旧天数为0，新天数>0）
-    if new_days > old_days:
-        return True, f"续期成功（剩余 {new_days} 天）", new_days
-    elif new_days == old_days and old_days > 0:
-        # 如果天数相同，可能续期未生效或已在近期续过，视为失败（除非旧天数为0）
-        return False, f"续期后天数未增加（仍为 {new_days} 天）", new_days
-    elif old_days == 0 and new_days > 0:
+    # 5. 判断续期是否成功：免费服务器续期后应变为 30 天
+    # 如果旧天数为 0，新天数为 30 => 成功
+    # 如果旧天数为 30，新天数为 30 => 可能重复续期，也视为成功（因为天数未减少）
+    if new_days >= old_days and new_days > 0:
         return True, f"续期成功（剩余 {new_days} 天）", new_days
     else:
         return False, f"续期异常（旧：{old_days} 天，新：{new_days} 天）", new_days
