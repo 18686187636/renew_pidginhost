@@ -123,6 +123,10 @@ def renew_server_via_panel(server_id):
         if '/accounts/login/' in location:
             return False, "重定向到登录页，Cookie 失效", None
 
+    # 等待一下，让服务器更新状态
+    import time
+    time.sleep(2)
+
     # 再次 GET 服务器详情页，解析到期信息
     detail_resp = panel_session.get(url, timeout=30)
     if detail_resp.status_code != 200:
@@ -132,8 +136,13 @@ def renew_server_via_panel(server_id):
         else:
             return False, f"续期失败，且无法获取详情页 (状态码 {detail_resp.status_code})", None
 
-    # 在 HTML 中查找 "expires in X days"
-    match = re.search(r'expires\s+in\s+(\d+)\s+days?', detail_resp.text, re.IGNORECASE)
+    # 去除 HTML 标签，获取纯净文本
+    clean_text = re.sub(r'<[^>]+>', ' ', detail_resp.text)  # 用空格替换标签
+    # 压缩多余空白
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+
+    # 在纯净文本中查找 "expires in X days"
+    match = re.search(r'expires\s+in\s+(\d+)\s+days?', clean_text, re.IGNORECASE)
     if match:
         days = int(match.group(1))
         if days > 0:
@@ -141,8 +150,10 @@ def renew_server_via_panel(server_id):
         else:
             return False, f"续期失败（到期剩余 {days} 天，未延长）", None
     else:
-        # 未找到天数，但可能页面结构变化，降级判断
+        # 未找到天数，可能页面结构变化，降级判断
         if post_resp.status_code == 302:
+            # 尝试打印部分文本以便调试（非必需，可注释掉）
+            # print(f"DEBUG: 页面前200字符: {clean_text[:200]}")
             return True, "续期成功（未解析到天数，但重定向成功）", None
         else:
             return False, "续期失败（未检测到续期成功标志）", None
