@@ -101,15 +101,19 @@ def get_csrf_token_and_action(session, url):
 
 def extract_expiry_days(html_text):
     """
-    从 HTML 文本中提取到期剩余天数，支持多种表述方式
-    返回 (days, matched_text) 或 (None, None)
+    从 HTML 中提取到期剩余天数，支持多种表述，并返回天数及匹配片段。
+    若未匹配，则返回 (None, None)
     """
-    # 去除 HTML 标签，得到纯文本
-    clean = re.sub(r'<[^>]+>', ' ', html_text)
-    # 压缩空白
+    # 清理 HTML：去除标签，转换常见实体，压缩空白
+    clean = html_text
+    # 将 &nbsp; 等实体转为空格
+    clean = re.sub(r'&[a-zA-Z]+;', ' ', clean)
+    # 去除标签
+    clean = re.sub(r'<[^>]+>', ' ', clean)
+    # 压缩多余空白
     clean = re.sub(r'\s+', ' ', clean).strip()
 
-    # 定义多个可能的模式
+    # 定义多种可能的模式（覆盖英文和中文）
     patterns = [
         r'expires\s+in\s+(\d+)\s+days?',
         r'remaining\s+(\d+)\s+days?',
@@ -117,21 +121,23 @@ def extract_expiry_days(html_text):
         r'valid\s+for\s+(\d+)\s+days?',
         r'expires\s+after\s+(\d+)\s+days?',
         r'(\d+)\s+days?\s+left',
-        # 中文模式（以防万一）
         r'剩余\s*(\d+)\s*天',
         r'到期.*?(\d+)\s*天',
+        r'(\d+)\s+days?',             # 兜底：直接找数字后跟 day(s)
     ]
 
     for pat in patterns:
         match = re.search(pat, clean, re.IGNORECASE)
         if match:
             days = int(match.group(1))
-            # 提取匹配到的文本片段（用于调试）
-            start = max(0, match.start() - 30)
-            end = min(len(clean), match.end() + 30)
+            # 提取匹配片段前后各50字符（用于调试）
+            start = max(0, match.start() - 50)
+            end = min(len(clean), match.end() + 50)
             snippet = clean[start:end].strip()
             return days, snippet
 
+    # 如果仍未匹配，搜索包含 "day" 或 "天" 的行，以便用户反馈
+    # 这里不返回，只在外部处理
     return None, None
 
 def renew_server_via_panel(server_id):
@@ -160,6 +166,7 @@ def renew_server_via_panel(server_id):
     delay = 2
     days = None
     snippet = None
+    detail_resp = None
     for attempt in range(max_retries):
         time.sleep(delay)
         detail_resp = panel_session.get(url, timeout=30)
@@ -172,13 +179,19 @@ def renew_server_via_panel(server_id):
     if days is not None and days > 0:
         return True, f"续期成功（到期剩余 {days} 天）", f"{days} days"
     else:
-        # 解析失败，但如果 POST 返回 302 且未跳转登录，仍视为成功，但记录调试信息
-        if post_resp.status_code == 302:
-            # 打印页面片段（去标签后的前 500 字符）以便排查
-            if detail_resp:
-                clean = re.sub(r'<[^>]+>', ' ', detail_resp.text)
-                clean = re.sub(r'\s+', ' ', clean).strip()
-                print(f"⚠️ 未能解析天数，页面片段（前300字符）:\n{clean[:300]}")
+        # 解析失败，但 POST 成功，我们打印调试信息
+        if post_resp.status_code == 302 and detail_resp:
+            # 尝试在清理后的文本中搜索 "day" 或 "天"，打印包含这些关键词的片段
+            clean = re.sub(r'<[^>]+>', ' ', detail_resp.text)
+            clean = re.sub(r'\s+', ' ', clean).strip()
+            # 搜索 "day" 或 "天"
+            match_day = re.search(r'[^.]*?(day|天)[^.]*?\.', clean, re.IGNORECASE)
+            if match_day:
+                context = match_day.group(0).strip()
+                print(f"⚠️ 找到疑似天数片段: {context[:200]}")
+            else:
+                # 如果没找到，打印前500字符
+                print(f"⚠️ 未找到天数关键词，页面开头500字符:\n{clean[:500]}")
             return True, "续期成功（未解析到天数，但重定向成功）", None
         else:
             return False, "续期失败（未检测到续期成功标志）", None
