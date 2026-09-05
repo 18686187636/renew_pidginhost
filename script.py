@@ -5,7 +5,7 @@ import re
 import json
 import requests
 import time
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 # ---------- 配置 ----------
 API_TOKEN = os.getenv('PIDGINHOST_API_TOKEN')
@@ -100,11 +100,6 @@ def get_csrf_token_and_action(session, url):
     return csrf_cookie, action_value, resp
 
 def extract_expiry_days(html_text):
-    """
-    从 HTML 中提取 "expires in X days" 或类似表述。
-    返回天数（int）或 None。
-    """
-    # 直接匹配原始 HTML（不清理）
     patterns = [
         r'This\s+free\s+server\s+expires\s+in\s+(\d+)\s+days?',
         r'expires\s+in\s+(\d+)\s+days?',
@@ -117,7 +112,7 @@ def extract_expiry_days(html_text):
         match = re.search(pat, html_text, re.IGNORECASE)
         if match:
             return int(match.group(1))
-    # 若失败，清理标签后再试
+    # 清理标签再试
     clean = re.sub(r'<[^>]+>', ' ', html_text)
     clean = re.sub(r'\s+', ' ', clean).strip()
     for pat in patterns:
@@ -127,10 +122,6 @@ def extract_expiry_days(html_text):
     return None
 
 def get_page(url, session, allow_redirects=True, cache_control=True):
-    """
-    获取页面，可设置缓存控制头。
-    返回 (响应对象, 最终URL)
-    """
     headers = {}
     if cache_control:
         headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
@@ -138,10 +129,8 @@ def get_page(url, session, allow_redirects=True, cache_control=True):
     return resp, resp.url if allow_redirects else url
 
 def get_current_days_for_url(url, session, max_retries=3, delay=2):
-    """
-    根据给定的 URL 获取当前剩余天数，重试 max_retries 次。
-    返回 (天数, 响应对象, 最终URL) 或 (None, None, None)
-    """
+    if not url:
+        return None, None, None
     for attempt in range(max_retries):
         if attempt > 0:
             time.sleep(delay)
@@ -152,17 +141,11 @@ def get_current_days_for_url(url, session, max_retries=3, delay=2):
         days = extract_expiry_days(resp.text)
         if days is not None:
             return days, resp, final_url
-        # 调试：打印页面片段
         snippet = resp.text[:300].replace('\n', ' ')
         print(f'  ⚠️ 未解析到天数 (尝试 {attempt+1}/{max_retries})，页面开头片段：{snippet}')
     return None, None, None
 
 def renew_server_via_panel(server_id):
-    """
-    续期服务器，并验证天数是否增加。
-    返回 (success, message, new_days)
-    """
-    # 1. 获取续期前的详情页 URL（用于提取旧天数）
     detail_url = urljoin(PANEL_BASE, f'panel/cloud/servers/{server_id}/')
     print('  ⏳ 获取续期前剩余天数...')
     old_days, _, _ = get_current_days_for_url(detail_url, panel_session, max_retries=2, delay=1)
@@ -170,40 +153,40 @@ def renew_server_via_panel(server_id):
         print('  ⚠️ 无法获取续期前天数，将视为 0')
         old_days = 0
 
-    # 2. 获取 CSRF token 和 action
+    # 获取 CSRF token 和 action
     csrf_token, action_value, resp = get_csrf_token_and_action(panel_session, detail_url)
     if not csrf_token:
         if resp.status_code == 302:
-            return False, "Cookie 过期或无效", None
+            # 检查是否重定向到登录页
+            location = resp.headers.get('Location', '')
+            if '/login' in location:
+                return False, "Cookie 已过期（重定向到登录页）", None
         return False, f"无法获取 CSRF token (状态码 {resp.status_code})", None
 
-    # 3. 发送续期 POST
+    # 发送续期 POST
     print('  🔄 发送续期请求...')
     data = {
         'csrfmiddlewaretoken': csrf_token,
         'action': action_value if action_value else 'extend_renewal'
     }
     headers = {'Referer': detail_url, 'X-CSRFToken': csrf_token}
-    # 不允许自动重定向，以便我们捕获 Location
     post_resp = panel_session.post(detail_url, data=data, headers=headers, allow_redirects=False, timeout=30)
 
     if post_resp.status_code == 302:
         location = post_resp.headers.get('Location', '')
-        if '/accounts/login/' in location:
-            return False, "重定向到登录页，Cookie 失效", None
-        # 使用 Location 作为续期后的目标 URL
-        # 注意：Location 可能是相对路径，需要拼接
+        if '/login' in location:
+            return False, "续期请求重定向到登录页，Cookie 已失效", None
         if not location.startswith('http'):
             location = urljoin(PANEL_BASE, location)
-        final_url = location
         print(f'  ✅ 收到续期重定向，Location: {location}')
+        final_url = location
     else:
         return False, f"续期请求失败 (状态码 {post_resp.status_code})", None
 
-    # 4. 等待并获取续期后的天数（使用 Location URL）
+    # 等待并获取续期后的天数
     print('  ⏳ 等待并获取续期后剩余天数...')
     new_days = None
-    for attempt in range(6):  # 最多尝试6次
+    for attempt in range(6):
         if attempt > 0:
             time.sleep(2)
         days, resp, final_url = get_current_days_for_url(final_url, panel_session, max_retries=1, delay=0)
@@ -215,13 +198,10 @@ def renew_server_via_panel(server_id):
     if new_days is None:
         return False, "续期后未能获取剩余天数", None
 
-    # 5. 判断续期是否成功：免费服务器续期后应变为 30 天
-    # 如果旧天数为 0，新天数为 30 => 成功
-    # 如果旧天数为 30，新天数为 30 => 可能重复续期，也视为成功（因为天数未减少）
     if new_days >= old_days and new_days > 0:
         return True, f"续期成功（剩余 {new_days} 天）", new_days
     else:
-        return False, f"续期异常（旧：{old_days} 天，新：{new_days} 天）", new_days
+        return False, f"续期异常（旧：{old_days}，新：{new_days}）", new_days
 
 def fetch_all_servers():
     url = urljoin('https://www.pidginhost.com/api/', 'cloud/servers/')
@@ -237,12 +217,17 @@ def fetch_all_servers():
 # ---------- 主逻辑 ----------
 def main():
     try:
-        # 验证 Cookie
-        test_url = urljoin(PANEL_BASE, 'panel/')
+        # 更严格的 Cookie 验证：尝试访问服务器列表页（需要登录）
+        test_url = urljoin(PANEL_BASE, 'panel/cloud/servers/')
         test_resp = panel_session.get(test_url, timeout=30)
         if test_resp.status_code != 200:
             print('❌ Cookie 无效或已过期，请重新导出并更新 PANEL_COOKIE')
             send_tg('❌ PidginHost 续期失败：Cookie 无效或过期')
+            sys.exit(1)
+        # 检查是否被重定向到登录页
+        if test_resp.url and '/login' in test_resp.url:
+            print('❌ Cookie 已过期（重定向到登录页）')
+            send_tg('❌ PidginHost 续期失败：Cookie 已过期')
             sys.exit(1)
         print('✅ Panel Cookie 有效')
 
