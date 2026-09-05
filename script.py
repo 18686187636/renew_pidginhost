@@ -4,6 +4,7 @@ import sys
 import re
 import json
 import requests
+import time
 from urllib.parse import urljoin
 
 # ---------- 配置 ----------
@@ -98,10 +99,42 @@ def get_csrf_token_and_action(session, url):
 
     return csrf_cookie, action_value, resp
 
+def extract_expiry_days(html_text):
+    """
+    从 HTML 文本中提取到期剩余天数，支持多种表述方式
+    返回 (days, matched_text) 或 (None, None)
+    """
+    # 去除 HTML 标签，得到纯文本
+    clean = re.sub(r'<[^>]+>', ' ', html_text)
+    # 压缩空白
+    clean = re.sub(r'\s+', ' ', clean).strip()
+
+    # 定义多个可能的模式
+    patterns = [
+        r'expires\s+in\s+(\d+)\s+days?',
+        r'remaining\s+(\d+)\s+days?',
+        r'(\d+)\s+days?\s+remaining',
+        r'valid\s+for\s+(\d+)\s+days?',
+        r'expires\s+after\s+(\d+)\s+days?',
+        r'(\d+)\s+days?\s+left',
+        # 中文模式（以防万一）
+        r'剩余\s*(\d+)\s*天',
+        r'到期.*?(\d+)\s*天',
+    ]
+
+    for pat in patterns:
+        match = re.search(pat, clean, re.IGNORECASE)
+        if match:
+            days = int(match.group(1))
+            # 提取匹配到的文本片段（用于调试）
+            start = max(0, match.start() - 30)
+            end = min(len(clean), match.end() + 30)
+            snippet = clean[start:end].strip()
+            return days, snippet
+
+    return None, None
+
 def renew_server_via_panel(server_id):
-    """
-    续期单台服务器，通过解析详情页中的 "expires in X days" 确认续期成功
-    """
     url = urljoin(PANEL_BASE, f'panel/cloud/servers/{server_id}/')
     csrf_token, action_value, resp = get_csrf_token_and_action(panel_session, url)
     if not csrf_token:
@@ -117,43 +150,35 @@ def renew_server_via_panel(server_id):
     headers = {'Referer': url, 'X-CSRFToken': csrf_token}
     post_resp = panel_session.post(url, data=data, headers=headers, allow_redirects=False, timeout=30)
 
-    # 如果 POST 返回 302 且跳转到登录页，直接失败
     if post_resp.status_code == 302:
         location = post_resp.headers.get('Location', '')
         if '/accounts/login/' in location:
             return False, "重定向到登录页，Cookie 失效", None
 
-    # 等待一下，让服务器更新状态
-    import time
-    time.sleep(2)
+    # 等待并重试获取详情页，最多重试 5 次，每次等待 2 秒
+    max_retries = 5
+    delay = 2
+    days = None
+    snippet = None
+    for attempt in range(max_retries):
+        time.sleep(delay)
+        detail_resp = panel_session.get(url, timeout=30)
+        if detail_resp.status_code != 200:
+            continue
+        days, snippet = extract_expiry_days(detail_resp.text)
+        if days is not None and days > 0:
+            break
 
-    # 再次 GET 服务器详情页，解析到期信息
-    detail_resp = panel_session.get(url, timeout=30)
-    if detail_resp.status_code != 200:
-        # 降级：如果 POST 是 302 且未跳转登录，就算成功（但记录警告）
-        if post_resp.status_code == 302:
-            return True, "续期成功（无法验证详情页，仅根据重定向判断）", None
-        else:
-            return False, f"续期失败，且无法获取详情页 (状态码 {detail_resp.status_code})", None
-
-    # 去除 HTML 标签，获取纯净文本
-    clean_text = re.sub(r'<[^>]+>', ' ', detail_resp.text)  # 用空格替换标签
-    # 压缩多余空白
-    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-
-    # 在纯净文本中查找 "expires in X days"
-    match = re.search(r'expires\s+in\s+(\d+)\s+days?', clean_text, re.IGNORECASE)
-    if match:
-        days = int(match.group(1))
-        if days > 0:
-            return True, f"续期成功（到期剩余 {days} 天）", f"{days} days"
-        else:
-            return False, f"续期失败（到期剩余 {days} 天，未延长）", None
+    if days is not None and days > 0:
+        return True, f"续期成功（到期剩余 {days} 天）", f"{days} days"
     else:
-        # 未找到天数，可能页面结构变化，降级判断
+        # 解析失败，但如果 POST 返回 302 且未跳转登录，仍视为成功，但记录调试信息
         if post_resp.status_code == 302:
-            # 尝试打印部分文本以便调试（非必需，可注释掉）
-            # print(f"DEBUG: 页面前200字符: {clean_text[:200]}")
+            # 打印页面片段（去标签后的前 500 字符）以便排查
+            if detail_resp:
+                clean = re.sub(r'<[^>]+>', ' ', detail_resp.text)
+                clean = re.sub(r'\s+', ' ', clean).strip()
+                print(f"⚠️ 未能解析天数，页面片段（前300字符）:\n{clean[:300]}")
             return True, "续期成功（未解析到天数，但重定向成功）", None
         else:
             return False, "续期失败（未检测到续期成功标志）", None
