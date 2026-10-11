@@ -6,32 +6,34 @@ on:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.12"
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            chromium-browser \
-            xvfb x11vnc novnc websockify \
-            fonts-noto-cjk \
-            wget curl
-
-      - name: Install Python dependencies
+      - name: Install Python deps
         run: |
           pip install DrissionPage requests pynacl
 
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb x11vnc novnc websockify \
+            chromium-browser || sudo apt-get install -y \
+            xvfb x11vnc novnc websockify chromium
+
       - name: Install cloudflared
         run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
-          chmod +x cloudflared
+          curl -fsSL -o /tmp/cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x /tmp/cloudflared
+          sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
+          cloudflared --version
 
       - name: Configure sing-box proxy
         id: singbox
@@ -126,37 +128,78 @@ jobs:
             echo "proxy_ready=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Start Xvfb + x11vnc + noVNC + cloudflared
+      - name: Start Xvfb
         run: |
-          Xvfb :99 -screen 0 1280x800x24 &
-          export DISPLAY=:99
-          sleep 2
-          x11vnc -display :99 -forever -nopw -shared -rfbport 5900 &
-          sleep 2
-          websockify --web=/usr/share/novnc/ 6080 localhost:5900 &
-          sleep 2
-          ./cloudflared tunnel --url http://localhost:6080 --no-autoupdate > cloudflared.log 2>&1 &
-          sleep 15
-          CF_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' cloudflared.log | head -n1)
-          NOVNC_FULL="${CF_URL}/vnc.html?autoconnect=1&resize=scale&host=localhost&port=6080"
-          echo "============================================================"
-          echo "noVNC 公网地址：$NOVNC_FULL"
-          echo "打开后会自动连接，看到远程 Chrome 桌面"
-          echo "============================================================"
-          echo "NOVNC_URL=$NOVNC_FULL" >> $GITHUB_ENV
+          Xvfb :99 -screen 0 1280x800x24 -ac +extension GLX +render -noreset &
+          sleep 3
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
-      - name: Run refresh cookie script
+      - name: Start x11vnc
+        run: |
+          x11vnc -display :99 -forever -shared -nopw -rfbport 5900 -bg > /tmp/x11vnc.log 2>&1
+          sleep 3
+
+      - name: Start noVNC
+        run: |
+          sudo websockify --web=/usr/share/novnc 6080 localhost:5900 > /tmp/novnc.log 2>&1 &
+          sleep 3
+          curl -s http://localhost:6080/vnc.html > /dev/null && echo "noVNC 就绪"
+
+      - name: Start cloudflared tunnel
+        run: |
+          cloudflared tunnel --url http://localhost:6080 > /tmp/cloudflared.log 2>&1 &
+          sleep 20
+          grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1 > /tmp/tunnel_url.txt
+          BASE=$(cat /tmp/tunnel_url.txt)
+          if [ -z "$BASE" ]; then
+            echo "❌ 未获取到 tunnel URL"
+            cat /tmp/cloudflared.log
+            exit 1
+          fi
+          URL="${BASE}/vnc.html?autoconnect=1&resize=scale"
+          echo "Tunnel URL: $URL"
+          echo "NOVNC_URL=$URL" >> "$GITHUB_ENV"
+          {
+            echo "## noVNC 地址（点击直接进桌面）";
+            echo "";
+            echo "### [$URL]($URL)";
+            echo "";
+            echo "**在 noVNC 里：**";
+            echo "1. 看到 Chrome 打开 PidginHost 登录页";
+            echo "2. 点页面上的 **Sign in with GitHub**";
+            echo "3. 输入 GitHub 账号密码";
+            echo "4. 完成 2FA";
+            echo "5. 如果有 Authorize 页面，点 **Authorize**";
+            echo "6. 等待跳回 PidginHost 面板";
+            echo "";
+            echo "**进入面板后**，脚本会自动导出 session 并更新 Secret（约 10 秒）。";
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Start Chrome and wait for login
         env:
           DISPLAY: ':99'
           GH_PAT: ${{ secrets.GH_PAT }}
           PROXY_SERVER: ${{ steps.singbox.outputs.proxy_ready == 'true' && 'http://127.0.0.1:1081' || '' }}
-        run: python refresh_cookie.py
+          NOVNC_URL: ${{ env.NOVNC_URL }}
+        run: |
+          python refresh_cookie.py 2>&1 | tee /tmp/setup.log
 
-      - name: Show sing-box log on failure
+      - name: Show logs on failure
         if: failure()
         run: |
-          [ -f sing-box.log ] && tail -50 sing-box.log || true
+          echo "===== sing-box.log ====="
+          [ -f sing-box.log ] && tail -30 sing-box.log || true
+          echo "===== x11vnc.log ====="
+          [ -f /tmp/x11vnc.log ] && tail -20 /tmp/x11vnc.log || true
+          echo "===== novnc.log ====="
+          [ -f /tmp/novnc.log ] && tail -20 /tmp/novnc.log || true
+          echo "===== cloudflared.log ====="
+          [ -f /tmp/cloudflared.log ] && tail -30 /tmp/cloudflared.log || true
 
-      - name: Keep noVNC alive on failure for debugging
-        if: failure()
-        run: sleep 60
+      - name: Cleanup
+        if: always()
+        run: |
+          pkill -f "cloudflared" || true
+          pkill -f "websockify" || true
+          pkill -f "x11vnc" || true
+          pkill -f "Xvfb" || true
