@@ -6,7 +6,7 @@ on:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 70
 
     steps:
       - uses: actions/checkout@v4
@@ -23,9 +23,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            xvfb x11vnc novnc websockify \
-            chromium-browser || sudo apt-get install -y \
-            xvfb x11vnc novnc websockify chromium
+            xvfb x11vnc novnc websockify openbox \
+            fonts-noto-cjk wget curl unzip
+
+      - name: Setup Chrome
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+          install-chromedriver: true
+
+      - name: Symlink chromium
+        run: |
+          sudo ln -sf "${{ steps.setup-chrome.outputs.chrome-path }}" /usr/local/bin/chromium
+          sudo ln -sf "${{ steps.setup-chrome.outputs.chrome-path }}" /usr/local/bin/chromium-browser
+          sudo ln -sf "${{ steps.setup-chrome.outputs.chromedriver-path }}" /usr/local/bin/chromedriver
+          chromium --version
 
       - name: Install cloudflared
         run: |
@@ -134,10 +147,16 @@ jobs:
           sleep 3
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
+      - name: Start openbox
+        run: |
+          DISPLAY=:99 openbox > /tmp/openbox.log 2>&1 &
+          sleep 2
+
       - name: Start x11vnc
         run: |
           x11vnc -display :99 -forever -shared -nopw -rfbport 5900 -bg > /tmp/x11vnc.log 2>&1
           sleep 3
+          ss -tuln | grep 5900 && echo "x11vnc 就绪"
 
       - name: Start noVNC
         run: |
@@ -147,7 +166,7 @@ jobs:
 
       - name: Start cloudflared tunnel
         run: |
-          cloudflared tunnel --url http://localhost:6080 > /tmp/cloudflared.log 2>&1 &
+          cloudflared tunnel --url http://localhost:6080 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
           sleep 20
           grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1 > /tmp/tunnel_url.txt
           BASE=$(cat /tmp/tunnel_url.txt)
@@ -156,7 +175,7 @@ jobs:
             cat /tmp/cloudflared.log
             exit 1
           fi
-          URL="${BASE}/vnc.html?autoconnect=1&resize=scale"
+          URL="${BASE}/vnc.html?autoconnect=1&resize=scale&path=websockify"
           echo "Tunnel URL: $URL"
           echo "NOVNC_URL=$URL" >> "$GITHUB_ENV"
           {
@@ -165,15 +184,34 @@ jobs:
             echo "### [$URL]($URL)";
             echo "";
             echo "**在 noVNC 里：**";
-            echo "1. 看到 Chrome 打开 PidginHost 登录页";
-            echo "2. 点页面上的 **Sign in with GitHub**";
-            echo "3. 输入 GitHub 账号密码";
-            echo "4. 完成 2FA";
-            echo "5. 如果有 Authorize 页面，点 **Authorize**";
-            echo "6. 等待跳回 PidginHost 面板";
+            echo "1. 看到 Chrome 打开 PidginHost 首页";
+            echo "2. 点右上角 **Sign in**（或 Login / Client Area）";
+            echo "3. 选择 **Sign in with GitHub**";
+            echo "4. 完成 GitHub 登录 + 2FA + OAuth 授权";
+            echo "5. 等页面跳回 PidginHost 面板";
             echo "";
-            echo "**进入面板后**，脚本会自动导出 session 并更新 Secret（约 10 秒）。";
+            echo "**进入面板后**，脚本会自动导出 Cookie 并更新 Secret（约 10 秒）。";
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify Chrome can launch
+        env:
+          DISPLAY: ':99'
+          PROXY_SERVER: ${{ steps.singbox.outputs.proxy_ready == 'true' && 'http://127.0.0.1:1081' || '' }}
+        run: |
+          python -c "
+          from DrissionPage import ChromiumOptions, ChromiumPage
+          import os, time
+          co = ChromiumOptions()
+          co.set_argument('--no-sandbox')
+          co.set_argument('--disable-dev-shm-usage')
+          co.set_browser_path('/usr/local/bin/chromium')
+          co.auto_port()
+          page = ChromiumPage(co)
+          page.get('https://www.pidginhost.com/')
+          time.sleep(3)
+          print('URL:', page.url)
+          print('Title:', page.title)
+          "
 
       - name: Start Chrome and wait for login
         env:
@@ -202,4 +240,5 @@ jobs:
           pkill -f "cloudflared" || true
           pkill -f "websockify" || true
           pkill -f "x11vnc" || true
+          pkill -f "openbox" || true
           pkill -f "Xvfb" || true
