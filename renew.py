@@ -24,6 +24,8 @@ if not PANEL_COOKIE_RAW:
     sys.exit(1)
 
 proxies = {'http': PROXY, 'https': PROXY} if PROXY else None
+if proxies:
+    print(f'🌐 使用代理: {PROXY}')
 
 api_session = requests.Session()
 api_session.headers.update({
