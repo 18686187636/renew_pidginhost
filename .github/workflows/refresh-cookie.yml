@@ -138,11 +138,12 @@ jobs:
           ./cloudflared tunnel --url http://localhost:6080 --no-autoupdate > cloudflared.log 2>&1 &
           sleep 15
           CF_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' cloudflared.log | head -n1)
+          NOVNC_FULL="${CF_URL}/vnc.html?autoconnect=1&resize=scale&host=localhost&port=6080"
           echo "============================================================"
-          echo "noVNC 公网地址：$CF_URL"
-          echo "打开后点击 'Connect'，然后在远程 Chrome 里完成 GitHub 登录"
+          echo "noVNC 公网地址：$NOVNC_FULL"
+          echo "打开后会自动连接，看到远程 Chrome 桌面"
           echo "============================================================"
-          echo "NOVNC_URL=$CF_URL" >> $GITHUB_ENV
+          echo "NOVNC_URL=$NOVNC_FULL" >> $GITHUB_ENV
 
       - name: Run refresh cookie script
         env:
