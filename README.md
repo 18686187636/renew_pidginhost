@@ -1,141 +1,74 @@
-# PidginHost 免费服务器自动续期
+# PidginHost 自动续期
 
-[![PidginHost Auto Renew](https://github.com/18686187636/renew_pidginhost/actions/workflows/renew.yml/badge.svg)](https://github.com/18686187636/renew_pidginhost/actions/workflows/renew.yml)
+通过 GitHub Actions 自动续期 PidginHost 免费云服务器。
 
-通过 GitHub Actions 自动续期 PidginHost 免费服务器（每 30 天约 3 次），并发送 Telegram 通知。支持通过代理访问（Sing‑box），适用于网络受限环境。
+## 架构
 
----
+- `renew.py`：定时运行，用 `PANEL_COOKIE` 登录面板续期。
+- `refresh_cookie.py`：手动运行，启动 Chrome + noVNC，你通过浏览器远程完成 GitHub OAuth，
+  脚本自动把新 Cookie 写回 GitHub Secret。
 
-## 📌 功能特性
+## 首次配置
 
-- 🔄 **自动续期**：每 10 天运行一次（即每 30 天约 3 次），确保服务器不会过期。
-- 🍪 **Cookie 认证**：使用浏览器导出的 `sessionid` 和 `csrftoken` 模拟登录 Panel，无需用户名/密码。
-- 🔗 **代理支持**：通过 `NODE_LINK` 配置 Sing‑box 代理，适用于需要代理访问 PidginHost 的场景。
-- 🤖 **Telegram 通知**：续期结果（成功/失败数量）实时推送到您的 Telegram。
-- 🚀 **完全自动化**：部署后无需人工干预，由 GitHub Actions 定时触发。
+### 1. Fork / 创建仓库
 
----
+把本项目所有文件推送到你的 GitHub 仓库。
 
-## 🛠️ 准备工作
+### 2. 添加 Secrets
 
-1. **GitHub 仓库**：Fork 或新建一个仓库用于存放工作流脚本。
-2. **PidginHost 账号**：需已登录（支持 GitHub OAuth）。
-3. **Telegram Bot**：用于接收通知（[BotFather](https://t.me/BotFather) 创建）。
+仓库 `Settings → Secrets and variables → Actions`，添加：
 
----
+| Secret 名 | 说明 |
+|-----------|------|
+| `PIDGINHOST_API_TOKEN` | PidginHost API Token |
+| `PANEL_COOKIE` | 初始 Cookie（见下方"首次获取"） |
+| `GH_PAT` | GitHub PAT，需 `repo` 权限 |
+| `PROXY_SERVER` | 可选，代理地址 |
+| `TG_BOT_TOKEN` | 可选，Telegram Bot Token |
+| `TG_CHAT_ID` | 可选，Telegram Chat ID |
 
-## 🔐 环境变量（Secrets）
+### 3. 首次获取 PANEL_COOKIE
 
-在仓库的 `Settings → Secrets and variables → Actions` 中添加以下 Secret：
+手动触发一次 `Refresh PidginHost Cookie (noVNC)` workflow：
 
-| Secret 名称 | 说明 | 获取方式 |
-|------------|------|----------|
-| `PIDGINHOST_API_TOKEN` | PidginHost API Token | 控制台 → Account → API Tokens → 创建 |
-| `PANEL_COOKIE` | 浏览器 Cookie（`sessionid` + `csrftoken`） | 见下文“获取 Cookie” |
-| `TG_BOT_TOKEN` | Telegram Bot Token | BotFather 创建后获得 |
-| `TG_CHAT_ID` | Telegram 聊天 ID（用户或群组） | 向 Bot 发送消息后，通过 `getUpdates` 获取 |
-| `NODE_LINK` | （可选）Sing‑box 订阅链接（vless:// 格式） | 代理服务商提供 |
+1. 进入仓库 `Actions` 页，选择 `Refresh PidginHost Cookie (noVNC)`，点 `Run workflow`。
+2. 等待日志出现 `noVNC 公网地址：https://xxx.trycloudflare.com`。
+3. 在浏览器打开该地址，点 `Connect`。
+4. 在远程 Chrome 里：
+   - 点击 `Sign in with GitHub`
+   - 完成 GitHub 登录 + 2FA
+   - 完成 OAuth 授权
+   - 等页面跳回 PidginHost 面板
+5. 脚本会自动检测并写回 `PANEL_COOKIE` Secret。
 
----
+> 如果 `GH_PAT` 没配好，脚本会在日志里打印 Cookie 字符串，你手动复制到 Secret 也行。
 
-## 🍪 获取 `PANEL_COOKIE`
+## 日常使用
 
-1. 在浏览器中登录 PidginHost（保持登录状态）。
-2. 按 `F12` → **Application**（或“存储”）→ **Cookies** → 选择 `https://www.pidginhost.com`。
-3. 复制 `sessionid` 和 `csrftoken` 的值，组合成以下格式：
-   ```
-   sessionid=你的sessionid; csrftoken=你的csrftoken
-   ```
-4. 将整个字符串作为 `PANEL_COOKIE` 的值添加到 Secrets。
+- `renew.py` 每 12 小时自动跑一次。
+- Cookie 过期时，`renew.py` 会发 Telegram 提醒你。
+- 收到提醒后，手动触发 `Refresh PidginHost Cookie (noVNC)` 即可。
 
-> **注意**：`sessionid` 通常有效期较长（约 1 年），但若过期，请重新导出并更新 Secret。
+## Cookie 有效期
 
----
+PidginHost 的 session 通常能维持数周，取决于服务器端配置。脚本无法延长，
+但可以自动刷新。
 
-## 📁 部署步骤
+## 常见问题
 
-1. **将以下文件放入仓库根目录**：
-   - `.github/workflows/renew.yml`（工作流定义）
-   - `script.py`（续期核心脚本）
+### noVNC 打开是黑屏
 
-2. **添加所有 Secrets**（参考上面的表格）。
+等 5-10 秒，或刷新页面。cloudflared 有时启动稍慢。
 
-3. **推送代码**到默认分支（如 `main`）。
+### 无法访问 cloudflared 地址
 
-4. **手动触发测试**：
-   - 进入仓库的 **Actions** 页面 → 选择 `PidginHost Auto Renew` → 点击 **Run workflow** → 观察日志。
+某些地区可能屏蔽 `trycloudflare.com`。可改用其他隧道，如 ngrok、serveo。
 
----
+### GitHub OAuth 被风控
 
-## ⚙️ 工作流说明
+CI 的 IP 是数据中心 IP，GitHub 可能要求邮箱验证码或设备验证。
+因为用的是真实浏览器 + noVNC，你可以手动完成这些验证。
 
-- **触发时机**：
-  - 定时：`cron: '0 0 */10 * *'`（每 10 天 UTC 00:00 运行）。
-  - 手动：支持 `workflow_dispatch`。
-- **步骤概览**：
-  1. 检出代码，安装 Python 及依赖（`requests[socks]`）。
-  2. （可选）下载并启动 Sing‑box 代理（若 `NODE_LINK` 存在）。
-  3. 执行 `script.py`，使用 API Token 获取服务器列表，并通过 Cookie 认证 Panel 执行续期。
-  4. 脚本内部发送 Telegram 通知（仅一条，包含详细结果）。
+### 想彻底不用 Cookie
 
----
-
-## 📜 脚本逻辑（`script.py`）
-
-1. **解析 Cookie**：从 `PANEL_COOKIE` 中提取 `sessionid` 和 `csrftoken`，注入到 `requests.Session`。
-2. **验证 Cookie**：访问 Panel 首页（`/panel/`），若返回 200 则有效。
-3. **获取服务器列表**：调用 `/api/cloud/servers/` 获得所有服务器 ID。
-4. **逐个续期**：
-   - 对于每台服务器，访问 `/panel/cloud/servers/{id}/`，提取 CSRF token。
-   - 发送 POST 请求，携带 `action=extend_renewal`。
-   - 若返回 302（重定向）则认为续期成功。
-5. **发送通知**：汇总成功/失败数量，通过 Telegram Bot 发送消息。
-
----
-
-## 📊 通知示例
-
-```
-✅ PidginHost 续期
-续期完成：成功 1 台，失败 0 台
-详情：
-✅ 服务器 4386 续期成功
-```
-
----
-
-## ❓ 常见问题
-
-### 1. 提示“缺少 PANEL_COOKIE”或“Cookie 无效”
-- 检查 Secret 名称是否准确（`PANEL_COOKIE` 全大写）。
-- 重新导出最新 Cookie，并确保格式正确。
-- 在 Actions 日志中查看 `✅ Panel Cookie 有效` 确认。
-
-### 2. 续期失败，状态码非 302
-- 可能 Cookie 已过期，重新导出更新。
-- 检查网络环境，若需要代理，确保 `NODE_LINK` 有效且代理启动成功。
-
-### 3. 如何修改续期频率？
-- 编辑 `.github/workflows/renew.yml` 中 `cron` 表达式（如改为 `'0 0 1,15 * *'` 每月 1 号和 15 号）。
-
-### 4. API Token 有什么用？没有会怎样？
-- API Token 用于获取服务器列表。若没有，您需要手动在脚本中硬编码服务器 ID（不推荐）。建议保留。
-
-### 5. 能否仅使用邮箱/密码登录？
-- 若您使用邮箱注册而非 GitHub OAuth，可在脚本中启用用户名/密码登录（需修改代码），但本方案推荐使用 Cookie，更安全且无需额外依赖。
-
----
-
-## 🤝 贡献
-
-欢迎提交 Issue 或 PR 以改进脚本。如有任何问题，请附上 Actions 日志以便排查。
-
----
-
-## 📄 许可证
-
-MIT License
-
----
-
-**Happy automating!** 🚀
+联系 `support@pidginhost.com`，请求为 GitHub OAuth 账户设置独立密码。
