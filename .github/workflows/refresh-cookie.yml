@@ -1,0 +1,73 @@
+name: Refresh PidginHost Cookie (noVNC)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            chromium-browser \
+            xvfb x11vnc novnc websockify \
+            fonts-noto-cjk \
+            wget curl
+
+      - name: Install Python dependencies
+        run: |
+          pip install DrissionPage requests pynacl
+
+      - name: Install cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
+          chmod +x cloudflared
+
+      - name: Start Xvfb + x11vnc + noVNC + cloudflared
+        run: |
+          # 启动 Xvfb
+          Xvfb :99 -screen 0 1280x800x24 &
+          export DISPLAY=:99
+          sleep 2
+
+          # 启动 x11vnc
+          x11vnc -display :99 -forever -nopw -shared -rfbport 5900 &
+          sleep 2
+
+          # 启动 noVNC
+          websockify --web=/usr/share/novnc/ 6080 localhost:5900 &
+          sleep 2
+
+          # 启动 cloudflared 隧道，暴露 6080
+          ./cloudflared tunnel --url http://localhost:6080 --no-autoupdate > cloudflared.log 2>&1 &
+          sleep 15
+
+          # 从日志提取公网 URL
+          CF_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' cloudflared.log | head -n1)
+          echo "============================================================"
+          echo "noVNC 公网地址：$CF_URL"
+          echo "打开后点击 'Connect'，然后在远程 Chrome 里完成 GitHub 登录"
+          echo "============================================================"
+          echo "NOVNC_URL=$CF_URL" >> $GITHUB_ENV
+
+      - name: Run refresh cookie script
+        env:
+          DISPLAY: ':99'
+          GH_PAT: ${{ secrets.GH_PAT }}
+          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+        run: python refresh_cookie.py
+
+      - name: Keep noVNC alive on failure for debugging
+        if: failure()
+        run: sleep 60
