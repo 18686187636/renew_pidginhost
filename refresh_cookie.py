@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""在 GitHub Actions 里启动 Chrome，等用户通过 noVNC 手动完成 GitHub OAuth 登录 PidginHost，
-然后把 pidginhost.com 的 session cookies 导出并写回 GitHub Secret PANEL_COOKIE。"""
+"""在 GitHub Actions 里启动 Chrome，通过 noVNC 手动完成 GitHub OAuth 登录 PidginHost，
+导出 pidginhost.com 的 session cookies 并写回 GitHub Secret PANEL_COOKIE。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from DrissionPage import ChromiumOptions, ChromiumPage
 
 LOGIN_URL = "https://www.pidginhost.com/panel/login/"
 PANEL_HOST = "www.pidginhost.com"
-WAIT_TIMEOUT = 25 * 60  # 25 分钟
+WAIT_TIMEOUT = 25 * 60
 
 
 def _all_cookies(page: ChromiumPage) -> list[dict]:
@@ -28,7 +28,6 @@ def _all_cookies(page: ChromiumPage) -> list[dict]:
         pass
     except Exception as exc:
         print(f"[setup] cookies(all_domains=True) 失败: {exc}")
-
     try:
         return page.cookies() or []
     except Exception as exc:
@@ -57,7 +56,6 @@ def main() -> int:
     co.set_argument("--lang=zh-CN,zh;q=0.9,en;q=0.8")
     co.set_argument("--window-size=1280,800")
     co.set_argument("--disable-blink-features=AutomationControlled")
-
     co.headless(False)
 
     proxy = os.environ.get("PROXY_SERVER", "").strip()
@@ -75,7 +73,6 @@ def main() -> int:
             break
 
     co.auto_port()
-
     page = ChromiumPage(co)
     page.get(LOGIN_URL)
 
@@ -91,16 +88,13 @@ def main() -> int:
             url = page.url
         except Exception:
             url = ""
-
         if url and url != last_url:
             print(f"[setup] URL: {url}")
             last_url = url
-
         if _is_logged_in(url):
             print("[setup] 检测到已进入 PidginHost 面板，等待 5 秒让 session 稳定...")
             time.sleep(5)
             return _export_and_save(page)
-
         time.sleep(2)
 
     print("[setup] 超时未完成，退出")
