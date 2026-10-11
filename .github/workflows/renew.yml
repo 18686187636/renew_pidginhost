@@ -2,7 +2,6 @@ name: PidginHost Renew
 
 on:
   schedule:
-    # 每 12 小时跑一次
     - cron: '0 */12 * * *'
   workflow_dispatch:
 
@@ -14,19 +13,116 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
         run: pip install requests
 
+      - name: Configure sing-box proxy
+        id: singbox
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+          SING_BOX_VERSION: "1.10.7"
+        run: |
+          set -e
+          if [ -z "$NODE_LINK" ]; then
+            echo "proxy_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64|amd64)  SB_ARCH="amd64" ;;
+            aarch64|arm64) SB_ARCH="arm64" ;;
+            *) exit 1 ;;
+          esac
+          PKG="sing-box-${SING_BOX_VERSION}-linux-${SB_ARCH}"
+          URL="https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${PKG}.tar.gz"
+          for PREFIX in "" "https://ghfast.top/" "https://ghproxy.net/" "https://gh-proxy.com/"; do
+            if curl -fL --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 180 \
+                 -o sing-box.tar.gz "${PREFIX}${URL}"; then
+              if file sing-box.tar.gz | grep -q 'gzip compressed data'; then break; fi
+              rm -f sing-box.tar.gz
+            fi
+          done
+          tar -xzf sing-box.tar.gz
+          SING_BOX_DIR=$(find . -maxdepth 1 -type d -name "sing-box-*" | head -1)
+          sudo mv "$SING_BOX_DIR/sing-box" /usr/local/bin/
+          sudo chmod +x /usr/local/bin/sing-box
+          rm -rf sing-box.tar.gz "$SING_BOX_DIR"
+
+          python3 << 'PYEOF'
+          import json, sys, os, re
+          from urllib.parse import urlparse, parse_qs
+          link = os.environ.get('NODE_LINK', '')
+          parsed = urlparse(link)
+          netloc = parsed.netloc
+          uuid, host_port = netloc.split('@', 1) if '@' in netloc else ('', netloc)
+          host, port = '', '443'
+          bm = re.match(r'^\[([^\]]+)\](?::(\d+))?$', host_port)
+          if bm:
+              host = bm.group(1)
+              if bm.group(2): port = bm.group(2)
+          else:
+              if host_port.count(':') > 1: host = host_port
+              elif ':' in host_port: host, port = host_port.split(':', 1)
+              else: host = host_port
+          params = parse_qs(parsed.query)
+          sni = params.get('sni', [''])[0] or host
+          fp = params.get('fp', [''])[0] or 'chrome'
+          flow = params.get('flow', [''])[0] or 'xtls-rprx-vision'
+          type_ = params.get('type', ['tcp'])[0]
+          security = params.get('security', [''])[0]
+          path = params.get('path', [''])[0]
+          host_header = params.get('host', [''])[0] or host
+          outbound = {"type": "vless", "tag": "vless-out", "server": host,
+                      "server_port": int(port), "uuid": uuid, "flow": flow,
+                      "packet_encoding": "packetaddr"}
+          if security.lower() != 'none':
+              outbound["tls"] = {"enabled": True, "server_name": sni, "insecure": False,
+                                 "utls": {"enabled": True, "fingerprint": fp}}
+          if type_ != 'tcp':
+              transport = {"type": type_}
+              if type_ == 'ws':
+                  transport["path"] = path or "/"
+                  transport["headers"] = {"Host": host_header}
+              elif type_ == 'grpc':
+                  transport["service_name"] = path or ""
+              outbound["transport"] = transport
+          if security == 'reality':
+              outbound['tls']['reality'] = {"enabled": True,
+                                            "public_key": params.get('pbk', [''])[0],
+                                            "short_id": params.get('sid', [''])[0]}
+          config = {"log": {"level": "warn"},
+                    "inbounds": [
+                        {"type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 1080},
+                        {"type": "http", "tag": "http-in", "listen": "127.0.0.1", "listen_port": 1081}],
+                    "outbounds": [outbound],
+                    "route": {"rules": [{"outbound": "vless-out", "protocol": ["tcp", "udp"]}]}}
+          with open("sing-box-config.json", "w") as f:
+              json.dump(config, f, indent=2)
+          PYEOF
+
+          nohup sing-box -c sing-box-config.json run > sing-box.log 2>&1 &
+          sleep 5
+          if ss -tuln 2>/dev/null | grep -q ':1080'; then
+            echo "proxy_ready=true" >> "$GITHUB_OUTPUT"
+          else
+            cat sing-box.log
+            echo "proxy_ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run renew script
         env:
           PIDGINHOST_API_TOKEN: ${{ secrets.PIDGINHOST_API_TOKEN }}
           PANEL_COOKIE: ${{ secrets.PANEL_COOKIE }}
-          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+          PROXY_SERVER: ${{ steps.singbox.outputs.proxy_ready == 'true' && 'http://127.0.0.1:1081' || '' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python renew.py
+
+      - name: Show sing-box log on failure
+        if: failure()
+        run: |
+          [ -f sing-box.log ] && tail -50 sing-box.log || true
